@@ -512,6 +512,788 @@ The agent is not simply generating text. It is coordinating **context, tools, de
 
 ---
 
+
+# 💻 C# Hands-On GenAI & Agentic AI Examples
+
+The fastest way to learn AI engineering is to **build each capability as a small .NET component** and then combine them.
+
+---
+
+# Example 1 — Your First LLM Abstraction
+
+Start with an interface rather than coupling the entire application to one model provider.
+
+```csharp
+public interface IChatService
+{
+    Task<string> GenerateAsync(
+        string prompt,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Application code now depends on:
+
+```text
+IChatService
+    ↓
+Your provider implementation
+    ↓
+LLM
+```
+
+This makes provider changes and automated testing easier.
+
+---
+
+# Example 2 — Simple ASP.NET Core AI Endpoint
+
+```csharp
+public sealed record ChatRequest(string Message);
+
+[ApiController]
+[Route("api/chat")]
+public sealed class ChatController : ControllerBase
+{
+    private readonly IChatService _chat;
+
+    public ChatController(IChatService chat)
+    {
+        _chat = chat;
+    }
+
+    [HttpPost]
+    public async Task<IActionResult> Chat(
+        [FromBody] ChatRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Message))
+        {
+            return BadRequest("Message is required.");
+        }
+
+        var answer = await _chat.GenerateAsync(
+            request.Message,
+            cancellationToken);
+
+        return Ok(new
+        {
+            answer
+        });
+    }
+}
+```
+
+You have now created a basic:
+
+```text
+HTTP Request
+     ↓
+ASP.NET Core
+     ↓
+IChatService
+     ↓
+LLM
+     ↓
+HTTP Response
+```
+
+---
+
+# Example 3 — Prompt Template in C#
+
+Keep prompts out of controller code.
+
+```csharp
+public static class SupportPrompt
+{
+    public static string Build(
+        string context,
+        string question)
+    {
+        return $"""
+        You are an enterprise support assistant.
+
+        Rules:
+        - Use the supplied context.
+        - Do not invent information.
+        - If the answer is unavailable, say so.
+
+        Context:
+        {context}
+
+        Question:
+        {question}
+        """;
+    }
+}
+```
+
+This makes prompts:
+
+- Testable
+- Versionable
+- Reusable
+- Easier to review
+
+---
+
+# Example 4 — Structured Output
+
+Suppose you want the model to classify a support ticket.
+
+```csharp
+public sealed record TicketClassification(
+    string Category,
+    string Priority,
+    double Confidence);
+```
+
+Your application should validate the returned structure before using it.
+
+```csharp
+public static bool IsValid(
+    TicketClassification result)
+{
+    var categories = new[]
+    {
+        "Billing",
+        "Technical",
+        "Account",
+        "Other"
+    };
+
+    var priorities = new[]
+    {
+        "Low",
+        "Medium",
+        "High",
+        "Critical"
+    };
+
+    return categories.Contains(result.Category)
+        && priorities.Contains(result.Priority)
+        && result.Confidence is >= 0 and <= 1;
+}
+```
+
+> Structured output reduces ambiguity, but **your application must still validate the result**.
+
+---
+
+# Example 5 — Add RAG to the Chat Application
+
+Combine the previous concepts.
+
+```csharp
+public sealed class EnterpriseAssistant
+{
+    private readonly IRetrievalService _retrieval;
+    private readonly IChatService _chat;
+
+    public EnterpriseAssistant(
+        IRetrievalService retrieval,
+        IChatService chat)
+    {
+        _retrieval = retrieval;
+        _chat = chat;
+    }
+
+    public async Task<string> AskAsync(
+        string question,
+        CancellationToken cancellationToken = default)
+    {
+        var chunks = await _retrieval.SearchAsync(
+            question,
+            topK: 5,
+            cancellationToken);
+
+        var context = string.Join(
+            "\n\n",
+            chunks.Select(x => x.Content));
+
+        var prompt = $"""
+        Answer using only the supplied context.
+
+        Context:
+        {context}
+
+        Question:
+        {question}
+
+        If the answer is not in the context,
+        say that the information is unavailable.
+        """;
+
+        return await _chat.GenerateAsync(
+            prompt,
+            cancellationToken);
+    }
+}
+```
+
+Now:
+
+```text
+User
+ ↓
+ASP.NET Core
+ ↓
+EnterpriseAssistant
+ ├── Search
+ └── LLM
+ ↓
+Grounded Answer
+```
+
+For the deeper RAG implementation, see **[RAG Using C# and .NET](./RAG-using-csharp.md)**.
+
+---
+
+# Example 6 — Define a Tool
+
+A tool should have:
+
+1. A name
+2. A description
+3. Input parameters
+4. An implementation
+5. Authorization rules
+
+Example:
+
+```csharp
+public sealed record Order(
+    string Id,
+    string Status,
+    decimal Amount);
+
+public interface IOrderService
+{
+    Task<Order?> GetOrderAsync(
+        string orderId,
+        CancellationToken cancellationToken = default);
+}
+```
+
+Tool wrapper:
+
+```csharp
+public sealed class OrderTools
+{
+    private readonly IOrderService _orders;
+
+    public OrderTools(IOrderService orders)
+    {
+        _orders = orders;
+    }
+
+    public async Task<Order?> GetOrderStatusAsync(
+        string orderId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _orders.GetOrderAsync(
+            orderId,
+            cancellationToken);
+    }
+}
+```
+
+Conceptually:
+
+```text
+LLM
+ ↓
+getOrderStatus("123")
+ ↓
+OrderTools
+ ↓
+IOrderService
+ ↓
+Order API / Database
+ ↓
+Order
+ ↓
+LLM
+ ↓
+Human-readable answer
+```
+
+---
+
+# Example 7 — Validate Tool Arguments
+
+Never blindly execute model-generated arguments.
+
+```csharp
+public static bool IsValidOrderId(string orderId)
+{
+    return !string.IsNullOrWhiteSpace(orderId)
+        && orderId.Length <= 50
+        && orderId.All(char.IsLetterOrDigit);
+}
+```
+
+Before execution:
+
+```csharp
+if (!IsValidOrderId(orderId))
+{
+    throw new ArgumentException(
+        "Invalid order ID.",
+        nameof(orderId));
+}
+```
+
+For sensitive operations, also validate:
+
+```text
+User Identity
+     ↓
+Permission
+     ↓
+Tool Permission
+     ↓
+Input Validation
+     ↓
+Tool Execution
+```
+
+---
+
+# Example 8 — A Simple Agent Loop
+
+An agent can be understood as a loop:
+
+```text
+Goal
+ ↓
+Think / Decide
+ ↓
+Select Tool
+ ↓
+Execute
+ ↓
+Observe
+ ↓
+Decide Again
+ ↓
+Finish
+```
+
+A simplified C# orchestration model:
+
+```csharp
+public sealed class AgentRunner
+{
+    private readonly IChatService _chat;
+    private readonly IToolRegistry _tools;
+
+    public AgentRunner(
+        IChatService chat,
+        IToolRegistry tools)
+    {
+        _chat = chat;
+        _tools = tools;
+    }
+
+    public async Task<string> RunAsync(
+        string goal,
+        CancellationToken cancellationToken = default)
+    {
+        const int maxIterations = 5;
+
+        var state = new AgentState(goal);
+
+        for (var i = 0; i < maxIterations; i++)
+        {
+            var decision = await _chat.GenerateAsync(
+                state.BuildPrompt(),
+                cancellationToken);
+
+            if (decision.StartsWith("FINAL:", StringComparison.OrdinalIgnoreCase))
+            {
+                return decision["FINAL:".Length..].Trim();
+            }
+
+            var toolCall = ToolCallParser.Parse(decision);
+
+            if (toolCall is null)
+            {
+                return "The agent could not produce a valid action.";
+            }
+
+            var result = await _tools.ExecuteAsync(
+                toolCall,
+                cancellationToken);
+
+            state.AddObservation(
+                toolCall,
+                result);
+        }
+
+        return "The agent reached its execution limit.";
+    }
+}
+```
+
+This is intentionally simplified. Production agents need stronger structured tool calls, state handling, permissions, retries, timeouts, tracing, evaluation and safety controls.
+
+---
+
+# Example 9 — Agent State
+
+Keep state explicit.
+
+```csharp
+public sealed class AgentState
+{
+    private readonly List<string> _observations = new();
+
+    public AgentState(string goal)
+    {
+        Goal = goal;
+    }
+
+    public string Goal { get; }
+
+    public IReadOnlyList<string> Observations =>
+        _observations;
+
+    public void AddObservation(
+        ToolCall call,
+        string result)
+    {
+        _observations.Add(
+            $"Tool: {call.Name}\nResult: {result}");
+    }
+
+    public string BuildPrompt()
+    {
+        var observations = string.Join(
+            "\n\n",
+            _observations);
+
+        return $"""
+        Goal:
+        {Goal}
+
+        Previous observations:
+        {observations}
+
+        Decide the next action.
+        """;
+    }
+}
+```
+
+This demonstrates an important agent concept:
+
+> **An agent is not just a prompt. It is a stateful orchestration loop.**
+
+---
+
+# Example 10 — Tool Registry
+
+Keep tools discoverable and centralized.
+
+```csharp
+public interface IToolRegistry
+{
+    Task<string> ExecuteAsync(
+        ToolCall call,
+        CancellationToken cancellationToken);
+}
+```
+
+Example implementation:
+
+```csharp
+public sealed class ToolRegistry : IToolRegistry
+{
+    private readonly OrderTools _orders;
+
+    public ToolRegistry(OrderTools orders)
+    {
+        _orders = orders;
+    }
+
+    public async Task<string> ExecuteAsync(
+        ToolCall call,
+        CancellationToken cancellationToken)
+    {
+        return call.Name switch
+        {
+            "getOrderStatus" =>
+                await ExecuteOrderStatusAsync(
+                    call,
+                    cancellationToken),
+
+            _ => throw new InvalidOperationException(
+                $"Unknown tool: {call.Name}")
+        };
+    }
+
+    private async Task<string> ExecuteOrderStatusAsync(
+        ToolCall call,
+        CancellationToken cancellationToken)
+    {
+        var orderId = call.Arguments["orderId"];
+
+        var order = await _orders.GetOrderStatusAsync(
+            orderId,
+            cancellationToken);
+
+        return order is null
+            ? "Order not found."
+            : $"Order {order.Id} is {order.Status}.";
+    }
+}
+```
+
+---
+
+# Example 11 — Human Approval for Dangerous Actions
+
+Not every tool call should execute automatically.
+
+```csharp
+public enum RiskLevel
+{
+    Low,
+    Medium,
+    High,
+    Critical
+}
+```
+
+Example policy:
+
+```csharp
+public static bool RequiresHumanApproval(
+    string toolName,
+    RiskLevel risk)
+{
+    if (risk is RiskLevel.High or RiskLevel.Critical)
+    {
+        return true;
+    }
+
+    return toolName switch
+    {
+        "deleteCustomer" => true,
+        "issueRefund" => true,
+        "deployProduction" => true,
+        _ => false
+    };
+}
+```
+
+Workflow:
+
+```text
+Agent
+ ↓
+Tool Request
+ ↓
+Risk Check
+ ├── Low → Execute
+ └── High → Human Approval
+                 ↓
+              Execute
+```
+
+This pattern is extremely important for enterprise Agentic AI.
+
+---
+
+# Example 12 — MCP-Friendly Tool Design
+
+When exposing capabilities through a protocol such as MCP, design tools with clear contracts.
+
+```csharp
+public sealed record SearchDocumentsRequest(
+    string Query,
+    int TopK);
+
+public sealed record SearchDocumentsResponse(
+    IReadOnlyList<DocumentChunk> Results);
+```
+
+The underlying business logic can remain independent:
+
+```text
+MCP Adapter
+     ↓
+Application Interface
+     ↓
+Domain / Business Logic
+     ↓
+Infrastructure
+```
+
+This keeps protocol concerns out of your core domain.
+
+---
+
+# Example 13 — Dependency Injection for AI Components
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+
+builder.Services.AddScoped<IChatService, ChatService>();
+builder.Services.AddScoped<IEmbeddingService, EmbeddingService>();
+builder.Services.AddScoped<IRetrievalService, AzureSearchRetrievalService>();
+
+builder.Services.AddScoped<IOrderService, OrderService>();
+builder.Services.AddScoped<OrderTools>();
+builder.Services.AddScoped<IToolRegistry, ToolRegistry>();
+builder.Services.AddScoped<AgentRunner>();
+
+var app = builder.Build();
+
+app.MapControllers();
+
+app.Run();
+```
+
+A clean dependency graph:
+
+```text
+Controller
+    ↓
+Application Service
+    ├── Chat
+    ├── Retrieval
+    └── Tools
+          ↓
+     Infrastructure
+```
+
+---
+
+# Example 14 — Add Cancellation and Timeouts
+
+AI requests can be slow or expensive.
+
+```csharp
+using var timeout =
+    CancellationTokenSource.CreateLinkedTokenSource(
+        cancellationToken);
+
+timeout.CancelAfter(TimeSpan.FromSeconds(30));
+
+var answer = await _chat.GenerateAsync(
+    prompt,
+    timeout.Token);
+```
+
+For production, also consider:
+
+- Retries with backoff
+- Circuit breakers
+- Rate limits
+- Concurrency limits
+- Token budgets
+- Model fallbacks
+
+---
+
+# Example 15 — Log AI Operations
+
+Never log sensitive prompts blindly.
+
+```csharp
+_logger.LogInformation(
+    "AI request started. Operation={Operation}, User={UserId}",
+    "RAG",
+    userId);
+```
+
+Track useful metadata:
+
+```text
+Request ID
+User / Tenant
+Model
+Latency
+Input tokens
+Output tokens
+Retrieved documents
+Tool calls
+Errors
+Cost estimate
+```
+
+Avoid logging secrets, credentials and unnecessary PII.
+
+---
+
+# 🧪 Build the Learning Projects in This Order
+
+```mermaid
+flowchart TD
+    A[💬 AI Chat API]
+    B[📝 AI Summarizer]
+    C[🔎 RAG Application]
+    D[🔧 Tool Calling]
+    E[🤖 Single Agent]
+    F[🧩 Agentic Workflow]
+    G[🔗 MCP Tools]
+    H[🏢 Enterprise AI Platform]
+
+    A --> B --> C --> D --> E --> F --> G --> H
+
+    classDef beginner fill:#E0F2FE,stroke:#0284C7,stroke-width:2px,color:#111
+    classDef intermediate fill:#EDE9FE,stroke:#7C3AED,stroke-width:2px,color:#111
+    classDef advanced fill:#FCE7F3,stroke:#DB2777,stroke-width:2px,color:#111
+    classDef architect fill:#DCFCE7,stroke:#16A34A,stroke-width:3px,color:#111
+
+    class A,B beginner
+    class C,D intermediate
+    class E,F,G advanced
+    class H architect
+```
+
+---
+
+# 🏆 What You Are Actually Learning
+
+Do not memorize the code. Understand the architecture:
+
+```text
+C# / .NET
+    ↓
+API
+    ↓
+LLM
+    ↓
+Context
+    ↓
+RAG
+    ↓
+Tools
+    ↓
+Agent
+    ↓
+State
+    ↓
+Orchestration
+    ↓
+Security
+    ↓
+Evaluation
+    ↓
+Observability
+    ↓
+Production
+```
+
+The goal is to become a **.NET engineer who can design AI systems**, not merely someone who knows how to call an LLM.
+
+
 # 🔗 Phase 10 — Learn AI Protocols
 
 Explore:
