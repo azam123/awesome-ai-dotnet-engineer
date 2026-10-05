@@ -444,6 +444,357 @@ Application
 
 ---
 
+
+# 💻 C# Hands-On Examples
+
+This section turns the architecture into actual **C#/.NET building blocks**.
+
+## Example 1 — RAG Domain Model
+
+```csharp
+public sealed record DocumentChunk(
+    string Id,
+    string DocumentId,
+    string Content,
+    int ChunkIndex,
+    IReadOnlyDictionary<string, string> Metadata);
+```
+
+## Example 2 — Embedding, Retrieval and Chat Interfaces
+
+```csharp
+public interface IEmbeddingService
+{
+    Task<float[]> GenerateAsync(
+        string text,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IRetrievalService
+{
+    Task<IReadOnlyList<DocumentChunk>> SearchAsync(
+        string query,
+        int topK,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IChatService
+{
+    Task<string> GenerateAsync(
+        string prompt,
+        CancellationToken cancellationToken = default);
+}
+```
+
+These abstractions keep provider-specific code in `Infrastructure`.
+
+## Example 3 — RAG Application Service
+
+```csharp
+public sealed class RagService
+{
+    private readonly IRetrievalService _retrieval;
+    private readonly IChatService _chat;
+
+    public RagService(
+        IRetrievalService retrieval,
+        IChatService chat)
+    {
+        _retrieval = retrieval;
+        _chat = chat;
+    }
+
+    public async Task<string> AskAsync(
+        string question,
+        CancellationToken cancellationToken = default)
+    {
+        var chunks = await _retrieval.SearchAsync(
+            question,
+            topK: 5,
+            cancellationToken);
+
+        var context = string.Join(
+            "\n\n---\n\n",
+            chunks.Select(x => x.Content));
+
+        var prompt = $"""
+        Answer using only the supplied context.
+
+        Context:
+        {context}
+
+        Question:
+        {question}
+
+        If the answer is not available in the context,
+        say that the information is not available.
+        """;
+
+        return await _chat.GenerateAsync(
+            prompt,
+            cancellationToken);
+    }
+}
+```
+
+The flow is:
+
+```text
+Question → Retrieval → Top-K Chunks → Context → LLM → Answer
+```
+
+## Example 4 — Simple C# Chunking
+
+```csharp
+public static IReadOnlyList<string> ChunkText(
+    string text,
+    int wordsPerChunk = 300)
+{
+    var words = text.Split(
+        new[] { ' ', '\r', '\n', '\t' },
+        StringSplitOptions.RemoveEmptyEntries);
+
+    var chunks = new List<string>();
+
+    for (var i = 0; i < words.Length; i += wordsPerChunk)
+    {
+        chunks.Add(string.Join(
+            " ",
+            words.Skip(i).Take(wordsPerChunk)));
+    }
+
+    return chunks;
+}
+```
+
+This is good for learning. For production, prefer structure-aware/token-aware chunking.
+
+## Example 5 — Grounded Prompt Builder
+
+```csharp
+public static string BuildPrompt(
+    string question,
+    IEnumerable<DocumentChunk> chunks)
+{
+    var context = string.Join(
+        "\n\n",
+        chunks.Select((chunk, index) =>
+            $"[Source {index + 1}]\n{chunk.Content}"));
+
+    return $"""
+    You are an enterprise knowledge assistant.
+
+    Rules:
+    - Use only the supplied context.
+    - Do not invent facts.
+    - If the answer is unavailable, say so.
+    - Mention source numbers when possible.
+
+    Context:
+    {context}
+
+    Question:
+    {question}
+    """;
+}
+```
+
+## Example 6 — ASP.NET Core Endpoint
+
+```csharp
+public sealed record AskRequest(string Question);
+
+[ApiController]
+[Route("api/rag")]
+public sealed class RagController : ControllerBase
+{
+    private readonly RagService _rag;
+
+    public RagController(RagService rag)
+    {
+        _rag = rag;
+    }
+
+    [HttpPost("ask")]
+    public async Task<IActionResult> Ask(
+        [FromBody] AskRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Question))
+        {
+            return BadRequest("Question is required.");
+        }
+
+        var answer = await _rag.AskAsync(
+            request.Question,
+            cancellationToken);
+
+        return Ok(new
+        {
+            request.Question,
+            answer
+        });
+    }
+}
+```
+
+Call it with:
+
+```http
+POST /api/rag/ask
+Content-Type: application/json
+
+{
+  "question": "What is our document retention policy?"
+}
+```
+
+## Example 7 — Dependency Injection
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+
+builder.Services.AddScoped<IRetrievalService, AzureSearchRetrievalService>();
+builder.Services.AddScoped<IChatService, ChatService>();
+builder.Services.AddScoped<RagService>();
+
+var app = builder.Build();
+
+app.MapControllers();
+
+app.Run();
+```
+
+Dependency flow:
+
+```text
+RagController
+     ↓
+RagService
+     ├── IRetrievalService
+     └── IChatService
+```
+
+## Example 8 — Return Citations
+
+```csharp
+public sealed record RagSource(
+    string DocumentId,
+    string Title,
+    string ChunkId);
+
+public sealed record RagAnswer(
+    string Answer,
+    IReadOnlyList<RagSource> Sources);
+```
+
+Now your UI can show:
+
+```text
+💬 Answer
+
+📚 Sources
+1. Employee Handbook
+2. Security Policy
+3. Retention Policy
+```
+
+## Example 9 — Secure Retrieval Request
+
+```csharp
+public sealed record RetrievalRequest(
+    string Query,
+    int TopK,
+    string TenantId,
+    string UserId);
+```
+
+The retrieval layer should enforce:
+
+```text
+User Identity
+     ↓
+Tenant
+     ↓
+Document ACL
+     ↓
+Allowed Documents
+     ↓
+Vector / Hybrid Search
+```
+
+> **Never rely on the LLM to enforce authorization.** Enforce permissions in the application/search layer.
+
+## Example 10 — Unit Test the RAG Orchestration
+
+```csharp
+[Fact]
+public async Task AskAsync_ReturnsGroundedAnswer()
+{
+    var retrieval = Substitute.For<IRetrievalService>();
+    var chat = Substitute.For<IChatService>();
+
+    retrieval.SearchAsync(
+        "What is RAG?",
+        5,
+        Arg.Any<CancellationToken>())
+        .Returns(new[]
+        {
+            new DocumentChunk(
+                "chunk-1",
+                "doc-1",
+                "RAG retrieves relevant context before generation.",
+                0,
+                new Dictionary<string, string>())
+        });
+
+    chat.GenerateAsync(
+        Arg.Any<string>(),
+        Arg.Any<CancellationToken>())
+        .Returns("RAG retrieves relevant context before generation.");
+
+    var service = new RagService(retrieval, chat);
+
+    var result = await service.AskAsync("What is RAG?");
+
+    Assert.Contains("relevant context", result);
+}
+```
+
+This uses NSubstitute-style mocking syntax; you can use your preferred .NET mocking library.
+
+## 🧪 Build These Examples in Order
+
+```text
+01. DocumentChunk
+       ↓
+02. Chunking
+       ↓
+03. Embeddings
+       ↓
+04. Search
+       ↓
+05. RetrievalService
+       ↓
+06. Prompt Construction
+       ↓
+07. ChatService
+       ↓
+08. RagService
+       ↓
+09. ASP.NET Core API
+       ↓
+10. Citations
+       ↓
+11. Security
+       ↓
+12. Evaluation
+       ↓
+13. Observability
+```
+
 # 🚀 Step 9 — Build RAG Incrementally
 
 ## 🟢 Level 1 — Learn
